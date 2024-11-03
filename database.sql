@@ -49,18 +49,24 @@ CREATE TABLE promotion (
 CREATE TABLE promotion_product (
     promotion_id INT FOREIGN KEY REFERENCES promotion(promotion_id),
     product_id INT FOREIGN KEY REFERENCES product(product_id),
-    current_quantity INT CHECK (current_quantity >= 0) -- Số lượng khuyến mãi còn lại
+    current_quantity INT CHECK (current_quantity >= 0), -- Remaining promotion quantity
+	quantity_sold INT DEFAULT 0 CHECK (quantity_sold >= 0), -- Tracks the quantity sold for each promotion-product pair
+    combo_sale_count INT DEFAULT 1, -- Count for combo sale (1 or 2 based on product type)
+    PRIMARY KEY (promotion_id, product_id)
 );
 
 CREATE TABLE loyalty_level_discount (
     level_name NVARCHAR(20) PRIMARY KEY,
-    discount_rate DECIMAL(5, 2) -- Phần trăm giảm giá
+    discount_rate DECIMAL(5, 2), -- Discount percentage for loyalty levels
+    promotion_id INT FOREIGN KEY REFERENCES promotion(promotion_id) -- Linking loyalty levels to promotions
 );
 
 ALTER TABLE customer
 ADD CONSTRAINT fk_loyalty_level
 FOREIGN KEY (loyalty_level) REFERENCES loyalty_level_discount(level_name);
 
+ALTER TABLE promotion_product
+ADD quantity_sold INT DEFAULT 0 CHECK (quantity_sold >= 0);
 
 
 

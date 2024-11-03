@@ -59,15 +59,121 @@ go
 CREATE PROCEDURE CheckExpiredPromotions
 AS
 BEGIN
-    -- Hủy các chương trình khuyến mãi đã hết hạn hoặc hết số lượng
+    -- Delete promotions that are expired, out of stock, or have reached the maximum quantity
     DELETE FROM promotion_product
-    WHERE current_quantity = 0 
-       OR EXISTS (
-           SELECT 1 
-           FROM promotion p 
-           WHERE p.promotion_id = promotion_product.promotion_id 
-           AND p.end_date < GETDATE()
-       );
+    WHERE 
+        current_quantity = 0
+        OR EXISTS (
+            SELECT 1
+            FROM promotion p
+            WHERE p.promotion_id = promotion_product.promotion_id
+              AND (
+                    p.end_date < GETDATE() -- Promotion has expired
+                    OR promotion_product.quantity_sold >= p.max_quantity -- Promotion has reached maximum quantity
+                  )
+        );
+END;
+GO
+
+go
+
+CREATE PROCEDURE ProcessPurchase
+    @customer_id INT,
+    @product_id INT,
+    @quantity INT,
+    @loyalty_level NVARCHAR(20) = NULL -- Optional parameter for member-sale promotions
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DECLARE @stock_quantity INT;
+    DECLARE @selected_promotion_id INT;
+    DECLARE @selected_discount_rate DECIMAL(5, 2);
+    DECLARE @promotion_type NVARCHAR(20);
+    DECLARE @final_discount_rate DECIMAL(5, 2);
+    DECLARE @required_stock INT;
+
+    -- 1. Check product stock
+    SELECT @stock_quantity = stock_quantity
+    FROM product
+    WHERE product_id = @product_id;
+
+    -- 2. Get the highest-priority promotion for the product based on promotion type
+    SELECT TOP 1 
+        @selected_promotion_id = pp.promotion_id,
+        @selected_discount_rate = p.discount_rate,
+        @promotion_type = p.promotion_type
+    FROM 
+        promotion_product pp
+    JOIN 
+        promotion p ON pp.promotion_id = p.promotion_id
+    WHERE 
+        pp.product_id = @product_id
+        AND pp.current_quantity > 0
+        AND GETDATE() BETWEEN p.start_date AND p.end_date
+    ORDER BY 
+        CASE 
+            WHEN p.promotion_type = 'flash-sale' THEN 1
+            WHEN p.promotion_type = 'combo-sale' THEN 2
+            WHEN p.promotion_type = 'member-sale' THEN 3
+        END;
+
+    -- 3. Check if the customer qualifies for a loyalty level discount (only for member-sale promotions)
+    IF @promotion_type = 'member-sale' AND @loyalty_level IS NOT NULL
+    BEGIN
+        DECLARE @loyalty_discount_rate DECIMAL(5, 2);
+
+        SELECT @loyalty_discount_rate = discount_rate
+        FROM loyalty_level_discount
+        WHERE level_name = @loyalty_level
+          AND promotion_id = @selected_promotion_id;
+
+        -- Calculate the final discount rate for member-sale (loyalty level + promotion discount)
+        SET @final_discount_rate = COALESCE(@loyalty_discount_rate, 0) + @selected_discount_rate;
+    END
+    ELSE
+    BEGIN
+        -- For flash-sale and combo-sale, use only the selected promotion discount rate
+        SET @final_discount_rate = @selected_discount_rate;
+    END
+
+    -- 4. Determine required stock quantity for combo sales
+    IF @promotion_type = 'combo-sale'
+    BEGIN
+        DECLARE @combo_sale_count INT;
+
+        SELECT @combo_sale_count = combo_sale_count
+        FROM promotion_product
+        WHERE promotion_id = @selected_promotion_id
+          AND product_id = @product_id;
+
+        SET @required_stock = @combo_sale_count * @quantity;
+    END
+    ELSE
+    BEGIN
+        SET @required_stock = @quantity;
+    END
+
+    -- 5. Check if there is sufficient stock
+    IF @stock_quantity < @required_stock
+    BEGIN
+        RAISERROR('Insufficient stock for product ID %d.', 16, 1, @product_id);
+        RETURN;
+    END
+
+    -- 6. Update product stock
+    UPDATE product
+    SET stock_quantity = stock_quantity - @required_stock
+    WHERE product_id = @product_id;
+
+    -- 7. Update promotion product quantity
+    IF @selected_promotion_id IS NOT NULL
+    BEGIN
+        UPDATE promotion_product
+        SET current_quantity = current_quantity - @quantity, quantity_sold = quantity_sold + @quantity
+        WHERE promotion_id = @selected_promotion_id
+          AND product_id = @product_id;
+    END
 END;
 go
 
